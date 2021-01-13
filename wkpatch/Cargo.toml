@@ -1,0 +1,13 @@
+[package]
+name = "wkpatch"
+version = "0.1.0"
+authors = ["Emil Hesslow <hesslow@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+bipatch = "1.0"
+bidiff = "1.0"
+integer-encoding = "3.0"
+num_enum = "0.5"
+walkdir = "2.3"
+zstd = "0.6"

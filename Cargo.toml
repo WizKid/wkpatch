@@ -1,0 +1,6 @@
+[workspace]
+
+members = [
+    "wkpatch",
+    "wkpatch-cli",
+]
