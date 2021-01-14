@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::fs;
 use std::fs::File;
+use std::hash::Hasher;
 use std::io;
 use std::io::Read;
 use std::io::Seek;
@@ -195,6 +196,28 @@ impl PatchMaker {
     }
 }
 
+struct HasherPassthruWriter<'a> {
+    hasher: &'a mut dyn Hasher,
+    writer: &'a mut dyn Write,
+}
+
+impl<'a> HasherPassthruWriter<'a> {
+    fn new(hasher: &'a mut dyn Hasher, writer: &'a mut dyn Write) -> Self {
+        Self { hasher, writer }
+    }
+}
+
+impl<'a> io::Write for HasherPassthruWriter<'a> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.hasher.write(buf);
+        self.writer.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
 struct PatchApplier {
     base: PathBuf,
 }
@@ -228,7 +251,10 @@ impl PatchApplier {
                     full_path.push(path);
 
                     let mut file_writer = File::create(full_path).unwrap();
-                    io::copy(&mut patch.take(len), &mut file_writer);
+                    let mut hasher = seahash::SeaHasher::default();
+                    let mut hash_writer = HasherPassthruWriter::new(&mut hasher, &mut file_writer);
+                    io::copy(&mut patch.take(len), &mut hash_writer);
+                    println!("Write {:?}", hasher.finish());
                 },
                 InstrType::BinaryPatch => {
                     let path = patch.read_path();
@@ -247,15 +273,17 @@ impl PatchApplier {
                     temp_path.push("ptch.tmp");
 
                     let mut file_writer = File::create(&temp_path).unwrap();
+                    let mut hasher = seahash::SeaHasher::default();
+                    let mut hash_writer = HasherPassthruWriter::new(&mut hasher, &mut file_writer);
 
                     let patch_reader = patch.take(len);
 
                     let mut patched_reader = bipatch::Reader::new(patch_reader, file_reader).unwrap();
 
-                    io::copy(&mut patched_reader, &mut file_writer);
+                    io::copy(&mut patched_reader, &mut hash_writer);
 
                     fs::rename(&temp_path, &full_path);
-                    println!("Diff applied {:?} {:?}", temp_path.display(), full_path.display())
+                    println!("Diff applied {:?} {:?} {:?} {:?}", temp_path.display(), full_path.display(), to_hash, hasher.finish());
                 },
                 InstrType::Remove => {
                     let path = patch.read_path();
