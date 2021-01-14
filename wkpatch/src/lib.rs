@@ -11,9 +11,11 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time;
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use walkdir::WalkDir;
 use integer_encoding::{VarIntWriter, VarIntReader};
 use num_enum;
+use seahash;
 
 #[repr(u8)]
 #[derive(Debug, num_enum::IntoPrimitive, num_enum::TryFromPrimitive)]
@@ -140,6 +142,10 @@ impl<'a> PatchWriter<'a> {
         self.write_varint(t as u8);
     }
 
+    fn write_path(&mut self, p: &Path) {
+        self.write_bytes(p.as_os_str().to_str().unwrap().as_bytes());
+    }
+
     fn write_bytes(&mut self, bytes: &[u8]) {
         self.write_varint(bytes.len());
         self.write_all(bytes);
@@ -159,6 +165,12 @@ impl<'a> io::Write for PatchWriter<'a> {
 struct PatchMaker {
     old_input: InputDir,
     new_input: InputDir,
+}
+
+fn calc_hash(buffer: &[u8]) -> u64 {
+    let hash = seahash::hash(&buffer);
+    println!("{:?}", hash);
+    hash
 }
 
 impl PatchMaker {
@@ -190,34 +202,38 @@ impl PatchMaker {
         i
     }
 
+    fn read_file(&self, base: &Path, p: &Path) -> Vec<u8> {
+        let mut full_path = base.to_path_buf();
+        full_path.push(p);
+        std::fs::read(&full_path).unwrap()
+    }
+
     fn add(&self, output: &mut PatchWriter, p: &Path) {
         output.write_instr_type(InstrType::Add);
-        output.write_bytes(p.as_os_str().to_str().unwrap().as_bytes());
-        let mut full_path = self.new_input.base.to_path_buf();
-        full_path.push(p);
-        let buffer = std::fs::read(&full_path).unwrap();
+        output.write_path(p);
+        let buffer = self.read_file(&self.new_input.base, p);
+        output.write_u64::<LittleEndian>(calc_hash(&buffer));
         output.write_bytes(&buffer);
     }
 
     fn remove(&self, output: &mut PatchWriter, p: &Path) {
         output.write_instr_type(InstrType::Remove);
-        output.write_bytes(p.as_os_str().to_str().unwrap().as_bytes());
+        output.write_path(p);
+        let buffer = self.read_file(&self.old_input.base, p);
+        output.write_u64::<LittleEndian>(calc_hash(&buffer));
     }
 
     fn diff(&self, output: &mut PatchWriter, p: &Path) {
-        let mut old_full_path = self.old_input.base.to_path_buf();
-        old_full_path.push(p);
-        let old_buffer = std::fs::read(&old_full_path).unwrap();
-
-        let mut new_full_path = self.new_input.base.to_path_buf();
-        new_full_path.push(p);
-        let new_buffer = std::fs::read(&new_full_path).unwrap();
+        let old_buffer = self.read_file(&self.old_input.base, p);
+        let new_buffer = self.read_file(&self.new_input.base, p);
 
         let mut output_buffer = Vec::new();
         bidiff::simple_diff_with_params(&old_buffer, &new_buffer, &mut output_buffer, &bidiff::DiffParams::new(4, Some(20971520)).unwrap());
 
         output.write_instr_type(InstrType::BinaryPatch);
-        output.write_bytes(p.as_os_str().to_str().unwrap().as_bytes());
+        output.write_path(p);
+        output.write_u64::<LittleEndian>(calc_hash(&old_buffer));
+        output.write_u64::<LittleEndian>(calc_hash(&new_buffer));
         output.write_bytes(&output_buffer);
     }
 }
@@ -241,7 +257,8 @@ impl PatchApplier {
             match t {
                 InstrType::Add => {
                     let path = patch.read_path();
-                    println!("Add {:?}", path);
+                    let hash = patch.read_u64::<LittleEndian>().unwrap();
+                    println!("Add {:?} {:?}", path, hash);
 
                     let len: u64 = patch.read_varint().unwrap();
 
@@ -253,7 +270,9 @@ impl PatchApplier {
                 },
                 InstrType::BinaryPatch => {
                     let path = patch.read_path();
-                    println!("Binary Patch {:?}", path);
+                    let from_hash = patch.read_u64::<LittleEndian>().unwrap();
+                    let to_hash = patch.read_u64::<LittleEndian>().unwrap();
+                    println!("Binary Patch {:?} {:?} {:?}", path, from_hash, to_hash);
 
                     let len: u64 = patch.read_varint().unwrap();
 
@@ -278,7 +297,8 @@ impl PatchApplier {
                 },
                 InstrType::Remove => {
                     let path = patch.read_path();
-                    println!("Remove {:?}", path);
+                    let hash = patch.read_u64::<LittleEndian>().unwrap();
+                    println!("Remove {:?} {:?}", path, hash);
                     let mut full_path = self.base.clone();
                     full_path.push(path);
                     fs::remove_file(full_path);
