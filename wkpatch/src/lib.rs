@@ -4,7 +4,6 @@ use std::convert::TryFrom;
 use std::fs;
 use std::fs::File;
 use std::io;
-use std::io::Cursor;
 use std::io::Read;
 use std::io::Seek;
 use std::io::Write;
@@ -56,7 +55,7 @@ impl<'a> PatchReader<'a> {
     }
 
     fn read_instr_type(&mut self) -> InstrType {
-        let mut t = self.read_varint::<u8>().unwrap();
+        let t = self.read_varint::<u8>().unwrap();
         InstrType::try_from(t).unwrap()
     }
 
@@ -249,7 +248,7 @@ impl PatchApplier {
 
                     let mut file_writer = File::create(&temp_path).unwrap();
 
-                    let mut patch_reader = patch.take(len);
+                    let patch_reader = patch.take(len);
 
                     let mut patched_reader = bipatch::Reader::new(patch_reader, file_reader).unwrap();
 
