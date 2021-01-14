@@ -20,61 +20,10 @@ use seahash;
 #[repr(u8)]
 #[derive(Debug, num_enum::IntoPrimitive, num_enum::TryFromPrimitive)]
 enum InstrType {
-    Add = 1,
-    Remove = 2,
-    Rename = 3,
+    Same = 1,
+    Add = 2,
+    Remove = 3,
     BinaryPatch = 4,
-}
-
-enum Instr<'a> {
-    Add { name: &'a str, content: Box<dyn Read + 'a> },
-    Remove { name: &'a str },
-    Rename { name: &'a str, new_name: &'a str },
-    BinaryPatch { name: &'a str, content: Box<dyn Read + 'a> },
-    // Patcher { name: &'a str },
-}
-
-struct InstrInterator<'a> {
-    curr: u32,
-    content: &'a [u8],
-}
-
-impl<'a> Iterator for InstrInterator<'a> {
-    type Item = Instr<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.curr += 1;
-        match self.curr {
-            1 => Some(Instr::Remove { name: str::from_utf8(&self.content[0..7]).unwrap() }),
-            2 => Some(Instr::Rename { name: str::from_utf8(&self.content[0..7]).unwrap(), new_name: str::from_utf8(&self.content[0..7]).unwrap() }),
-            3 => Some(Instr::Add { name: str::from_utf8(&self.content[0..7]).unwrap(), content: Box::new(Cursor::new(&self.content[7..8])) }),
-            4 => Some(Instr::BinaryPatch { name: str::from_utf8(&self.content[0..7]).unwrap(), content: Box::new(Cursor::new(&self.content[7..8])) }),
-            _ => None
-        }
-    }
-}
-
-fn test_fn() {
-    let content = "foo.logb".as_bytes();
-
-    let iter = InstrInterator { curr: 0, content };
-
-    for instr in iter {
-        match instr {
-            Instr::Add { name, mut content } => {
-                let mut bytes = vec![];
-                content.read_to_end(&mut bytes).unwrap();
-                println!("Add {} {:02X?}", name, bytes);
-            },
-            Instr::Remove { name } => println!("Remove {}", name),
-            Instr::Rename { name, new_name } => println!("Rename {} {}", name, new_name),
-            Instr::BinaryPatch { name, mut content } => {
-                let mut bytes = vec![];
-                content.read_to_end(&mut bytes).unwrap();
-                println!("BinaryPatch {} {:02X?}", name, bytes);
-            }
-        }
-    }
 }
 
 struct InputDir {
@@ -227,14 +176,23 @@ impl PatchMaker {
         let old_buffer = self.read_file(&self.old_input.base, p);
         let new_buffer = self.read_file(&self.new_input.base, p);
 
-        let mut output_buffer = Vec::new();
-        bidiff::simple_diff_with_params(&old_buffer, &new_buffer, &mut output_buffer, &bidiff::DiffParams::new(4, Some(20971520)).unwrap());
+        let old_hash = calc_hash(&old_buffer);
+        let new_hash = calc_hash(&new_buffer);
 
-        output.write_instr_type(InstrType::BinaryPatch);
-        output.write_path(p);
-        output.write_u64::<LittleEndian>(calc_hash(&old_buffer));
-        output.write_u64::<LittleEndian>(calc_hash(&new_buffer));
-        output.write_bytes(&output_buffer);
+        if old_hash == new_hash && old_buffer == new_buffer {
+            output.write_instr_type(InstrType::Same);
+            output.write_path(p);
+            output.write_u64::<LittleEndian>(new_hash);
+        } else {
+            let mut output_buffer = Vec::new();
+            bidiff::simple_diff_with_params(&old_buffer, &new_buffer, &mut output_buffer, &bidiff::DiffParams::new(4, Some(20971520)).unwrap());
+
+            output.write_instr_type(InstrType::BinaryPatch);
+            output.write_path(p);
+            output.write_u64::<LittleEndian>(old_hash);
+            output.write_u64::<LittleEndian>(new_hash);
+            output.write_bytes(&output_buffer);
+        }
     }
 }
 
@@ -255,6 +213,11 @@ impl PatchApplier {
             let t = patch.read_instr_type();
             println!("InstrType: {:?}", t);
             match t {
+                InstrType::Same => {
+                    let path = patch.read_path();
+                    let hash = patch.read_u64::<LittleEndian>().unwrap();
+                    println!("Same {:?} {:?}", path, hash);
+                },
                 InstrType::Add => {
                     let path = patch.read_path();
                     let hash = patch.read_u64::<LittleEndian>().unwrap();
@@ -302,11 +265,6 @@ impl PatchApplier {
                     let mut full_path = self.base.clone();
                     full_path.push(path);
                     fs::remove_file(full_path);
-                },
-                InstrType::Rename => {
-                    let from_path = patch.read_path();
-                    let to_path = patch.read_path();
-                    println!("{:?} {:?}", from_path, to_path);
                 }
             }
         }
