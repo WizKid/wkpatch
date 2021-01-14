@@ -40,13 +40,19 @@ fn main() {
             let to_directory = Path::new(sub_match.value_of("TO_DIRECTORY").unwrap());
             let patch_path = Path::new(sub_match.value_of("PATCH_PATH").unwrap());
             println!("create was used {} {} {}", from_directory.display(), to_directory.display(), patch_path.display());
-            wkpatch::create_patch(from_directory, to_directory, patch_path);
+            let res = wkpatch::create_patch(from_directory, to_directory, patch_path);
+            if let Err(err) = res {
+                println!("{:?}", err);
+            }
         },
         ("apply",  Some(sub_match)) => {
             let patch_path = Path::new(sub_match.value_of("PATCH_PATH").unwrap());
             let directory = Path::new(sub_match.value_of("DIRECTORY").unwrap());
             println!("apply was used {} {}", patch_path.display(), directory.display());
-            wkpatch::apply_patch(patch_path, directory);
+            let res = wkpatch::apply_patch(patch_path, directory);
+            if let Err(err) = res {
+                println!("{:?}", err);
+            }
         },
         _ => {
             println!("unknown");
