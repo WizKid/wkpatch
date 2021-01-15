@@ -1,4 +1,5 @@
-use std::str;
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use integer_encoding::{VarIntReader, VarIntWriter};
 use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::error;
@@ -12,12 +13,9 @@ use std::io::Seek;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::str;
 use std::time;
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use walkdir::WalkDir;
-use integer_encoding::{VarIntWriter, VarIntReader};
-use num_enum;
-use seahash;
 
 #[repr(u8)]
 #[derive(Debug, num_enum::IntoPrimitive, num_enum::TryFromPrimitive)]
@@ -30,7 +28,7 @@ enum InstrType {
 
 #[derive(Debug)]
 pub enum CreateError {
-    IO(io::Error)
+    IO(io::Error),
 }
 
 impl fmt::Display for CreateError {
@@ -58,7 +56,7 @@ impl From<io::Error> for CreateError {
 #[derive(Debug)]
 pub enum ApplyError {
     ChecksumMismatch,
-    IO(io::Error)
+    IO(io::Error),
 }
 
 impl fmt::Display for ApplyError {
@@ -205,7 +203,10 @@ struct PatchMaker {
 
 impl PatchMaker {
     fn new(old_input: InputDir, new_input: InputDir) -> Self {
-        Self { old_input, new_input }
+        Self {
+            old_input,
+            new_input,
+        }
     }
 
     fn create(&mut self, output: &mut PatchWriter) -> Result<u32, CreateError> {
@@ -268,7 +269,12 @@ impl PatchMaker {
             output.write_u64::<LittleEndian>(new_hash)?;
         } else {
             let mut output_buffer = Vec::new();
-            bidiff::simple_diff_with_params(&old_buffer, &new_buffer, &mut output_buffer, &bidiff::DiffParams::new(4, Some(20971520)).unwrap())?;
+            bidiff::simple_diff_with_params(
+                &old_buffer,
+                &new_buffer,
+                &mut output_buffer,
+                &bidiff::DiffParams::new(4, Some(20971520)).unwrap(),
+            )?;
 
             output.write_instr_type(InstrType::BinaryPatch)?;
             output.write_path(p)?;
@@ -334,7 +340,7 @@ impl PatchApplier {
                     if org_hash != hash {
                         return Err(ApplyError::ChecksumMismatch);
                     }
-                },
+                }
                 InstrType::Add => {
                     let path = patch.read_path()?;
                     let hash = patch.read_u64::<LittleEndian>()?;
@@ -346,9 +352,10 @@ impl PatchApplier {
                     full_path.push(path);
 
                     if full_path.exists() {
-                        return Err(ApplyError::IO(
-                            io::Error::new(io::ErrorKind::AlreadyExists, "Can not add file that already exists")
-                        ));
+                        return Err(ApplyError::IO(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            "Can not add file that already exists",
+                        )));
                     }
 
                     let mut file_writer = File::create(full_path)?;
@@ -361,7 +368,7 @@ impl PatchApplier {
                     }
 
                     println!("Write {:?}", hasher.finish());
-                },
+                }
                 InstrType::BinaryPatch => {
                     let path = patch.read_path()?;
                     let from_hash = patch.read_u64::<LittleEndian>()?;
@@ -391,7 +398,8 @@ impl PatchApplier {
 
                     let mut patch_reader = patch.take(len);
 
-                    let mut patched_reader = bipatch::Reader::new(&mut patch_reader, &mut file_reader).unwrap();
+                    let mut patched_reader =
+                        bipatch::Reader::new(&mut patch_reader, &mut file_reader).unwrap();
 
                     io::copy(&mut patched_reader, &mut hash_writer)?;
 
@@ -400,8 +408,14 @@ impl PatchApplier {
                     }
 
                     fs::rename(&temp_path, &full_path)?;
-                    println!("Diff applied {:?} {:?} {:?} {:?}", temp_path.display(), full_path.display(), to_hash, hasher.finish());
-                },
+                    println!(
+                        "Diff applied {:?} {:?} {:?} {:?}",
+                        temp_path.display(),
+                        full_path.display(),
+                        to_hash,
+                        hasher.finish()
+                    );
+                }
                 InstrType::Remove => {
                     let path = patch.read_path()?;
                     let hash = patch.read_u64::<LittleEndian>()?;
@@ -424,23 +438,27 @@ impl PatchApplier {
         let elapsed = start.elapsed();
 
         // Debug format
-        println!("Patching took: {:?}", elapsed); 
+        println!("Patching took: {:?}", elapsed);
         Ok(())
     }
 }
 
-pub fn create_patch(from_directory: &Path, to_directory: &Path, patch_path: &Path) -> Result<(), CreateError> {
+pub fn create_patch(
+    from_directory: &Path,
+    to_directory: &Path,
+    patch_path: &Path,
+) -> Result<(), CreateError> {
     let old_input = InputDir::new(from_directory);
     let new_input = InputDir::new(to_directory);
     let mut file_writer = File::create(patch_path)?;
-    file_writer.write(b"PTCH\0\0\0\0")?;
+    file_writer.write_all(b"PTCH\0\0\0\0")?;
     let mut zstd_writer = zstd::stream::Encoder::new(&mut file_writer, 10)?;
     let mut patch_writer = PatchWriter::new(&mut zstd_writer);
     let mut patch_maker = PatchMaker::new(old_input, new_input);
     let instr_count = patch_maker.create(&mut patch_writer)?;
     zstd_writer.finish()?;
     file_writer.seek(io::SeekFrom::Start(4))?;
-    file_writer.write(&instr_count.to_be_bytes())?;
+    file_writer.write_all(&instr_count.to_be_bytes())?;
 
     Ok(())
 }
