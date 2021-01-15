@@ -172,15 +172,35 @@ impl<'a> io::Write for PatchWriter<'a> {
     }
 }
 
-struct PatchMaker {
-    old_input: InputDir,
-    new_input: InputDir,
+struct HasherWriter<T: Hasher>(T);
+
+impl<T: Hasher> io::Write for HasherWriter<T> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn calc_hash(buffer: &[u8]) -> u64 {
     let hash = seahash::hash(&buffer);
     println!("{:?}", hash);
     hash
+}
+
+fn calc_hash_from_reader(reader: &mut dyn Read) -> Result<u64, io::Error> {
+    let mut hasher = seahash::SeaHasher::default();
+    let mut hasher_writer = HasherWriter(&mut hasher);
+    io::copy(reader, &mut hasher_writer)?;
+    Ok(hasher.finish())
+}
+
+struct PatchMaker {
+    old_input: InputDir,
+    new_input: InputDir,
 }
 
 impl PatchMaker {
@@ -218,7 +238,7 @@ impl PatchMaker {
         std::fs::read(&full_path)
     }
 
-    fn add(&self, output: &mut PatchWriter, p: &Path) -> Result<(), CreateError> {
+    fn add(&self, output: &mut PatchWriter, p: &Path) -> Result<(), io::Error> {
         output.write_instr_type(InstrType::Add)?;
         output.write_path(p)?;
         let buffer = self.read_file(&self.new_input.base, p)?;
@@ -227,7 +247,7 @@ impl PatchMaker {
         Ok(())
     }
 
-    fn remove(&self, output: &mut PatchWriter, p: &Path) -> Result<(), CreateError> {
+    fn remove(&self, output: &mut PatchWriter, p: &Path) -> Result<(), io::Error> {
         output.write_instr_type(InstrType::Remove)?;
         output.write_path(p)?;
         let buffer = self.read_file(&self.old_input.base, p)?;
@@ -248,7 +268,7 @@ impl PatchMaker {
             output.write_u64::<LittleEndian>(new_hash)?;
         } else {
             let mut output_buffer = Vec::new();
-            bidiff::simple_diff_with_params(&old_buffer, &new_buffer, &mut output_buffer, &bidiff::DiffParams::new(4, Some(20971520)).unwrap());
+            bidiff::simple_diff_with_params(&old_buffer, &new_buffer, &mut output_buffer, &bidiff::DiffParams::new(4, Some(20971520)).unwrap())?;
 
             output.write_instr_type(InstrType::BinaryPatch)?;
             output.write_path(p)?;
@@ -304,6 +324,16 @@ impl PatchApplier {
                     let path = patch.read_path()?;
                     let hash = patch.read_u64::<LittleEndian>()?;
                     println!("Same {:?} {:?}", path, hash);
+
+                    let mut full_path = self.base.clone();
+                    full_path.push(path);
+
+                    let mut file_reader = File::open(&full_path)?;
+                    let org_hash = calc_hash_from_reader(&mut file_reader)?;
+
+                    if org_hash != hash {
+                        return Err(ApplyError::ChecksumMismatch);
+                    }
                 },
                 InstrType::Add => {
                     let path = patch.read_path()?;
@@ -314,6 +344,12 @@ impl PatchApplier {
 
                     let mut full_path = self.base.clone();
                     full_path.push(path);
+
+                    if full_path.exists() {
+                        return Err(ApplyError::IO(
+                            io::Error::new(io::ErrorKind::AlreadyExists, "Can not add file that already exists")
+                        ));
+                    }
 
                     let mut file_writer = File::create(full_path)?;
                     let mut hasher = seahash::SeaHasher::default();
@@ -337,7 +373,14 @@ impl PatchApplier {
                     let mut full_path = self.base.clone();
                     full_path.push(path);
 
-                    let file_reader = File::open(&full_path)?;
+                    let mut file_reader = File::open(&full_path)?;
+
+                    let org_hash = calc_hash_from_reader(&mut file_reader)?;
+                    if org_hash != from_hash {
+                        return Err(ApplyError::ChecksumMismatch);
+                    }
+
+                    file_reader.seek(io::SeekFrom::Start(0))?;
 
                     let mut temp_path = self.base.clone();
                     temp_path.push("ptch.tmp");
@@ -346,9 +389,9 @@ impl PatchApplier {
                     let mut hasher = seahash::SeaHasher::default();
                     let mut hash_writer = HasherPassthruWriter::new(&mut hasher, &mut file_writer);
 
-                    let patch_reader = patch.take(len);
+                    let mut patch_reader = patch.take(len);
 
-                    let mut patched_reader = bipatch::Reader::new(patch_reader, file_reader).unwrap();
+                    let mut patched_reader = bipatch::Reader::new(&mut patch_reader, &mut file_reader).unwrap();
 
                     io::copy(&mut patched_reader, &mut hash_writer)?;
 
@@ -365,6 +408,14 @@ impl PatchApplier {
                     println!("Remove {:?} {:?}", path, hash);
                     let mut full_path = self.base.clone();
                     full_path.push(path);
+
+                    let mut file_reader = File::open(&full_path)?;
+                    let org_hash = calc_hash_from_reader(&mut file_reader)?;
+
+                    if org_hash != hash {
+                        return Err(ApplyError::ChecksumMismatch);
+                    }
+
                     fs::remove_file(full_path)?;
                 }
             }
