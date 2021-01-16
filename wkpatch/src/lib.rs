@@ -213,19 +213,25 @@ impl PatchMaker {
     fn create(&mut self, output: &mut PatchWriter) -> Result<u32, CreateError> {
         let mut i = 0u32;
         println!("Start remove");
-        for p in self.old_input.files.difference(&self.new_input.files) {
+        let mut removed_paths: Vec<_> = self.old_input.files.difference(&self.new_input.files).collect();
+        removed_paths.sort();
+        for p in removed_paths {
             self.remove(output, p)?;
             i += 1;
             println!("Remove {} {}", i, p.display());
         }
         println!("Start add");
-        for p in self.new_input.files.difference(&self.old_input.files) {
+        let mut added_paths: Vec<_> = self.new_input.files.difference(&self.old_input.files).collect();
+        added_paths.sort();
+        for p in added_paths {
             self.add(output, p)?;
             i += 1;
             println!("Add {} {}", i, p.display());
         }
         println!("Start diff");
-        for p in self.old_input.files.intersection(&self.new_input.files) {
+        let mut diff_paths: Vec<_> = self.old_input.files.intersection(&self.new_input.files).collect();
+        diff_paths.sort();
+        for p in diff_paths {
             println!("Diff Start {} {}", i, p.display());
             self.diff(output, p)?;
             i += 1;
