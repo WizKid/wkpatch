@@ -23,7 +23,8 @@ enum InstrType {
     Same = 1,
     Add = 2,
     Remove = 3,
-    BinaryPatch = 4,
+    Replace = 4,
+    BinaryPatch = 5,
 }
 
 #[derive(Debug)]
@@ -268,19 +269,29 @@ impl PatchMaker {
             output.write_path(p)?;
             output.write_u64::<LittleEndian>(new_hash)?;
         } else {
-            let mut output_buffer = Vec::new();
-            bidiff::simple_diff_with_params(
-                &old_buffer,
-                &new_buffer,
-                &mut output_buffer,
-                &bidiff::DiffParams::new(4, Some(20971520)).unwrap(),
-            )?;
-
-            output.write_instr_type(InstrType::BinaryPatch)?;
+            let is_replace = old_buffer.is_empty();
+            let instr = if is_replace {
+                InstrType::Replace
+            } else {
+                InstrType::BinaryPatch
+            };
+            output.write_instr_type(instr)?;
             output.write_path(p)?;
             output.write_u64::<LittleEndian>(old_hash)?;
             output.write_u64::<LittleEndian>(new_hash)?;
-            output.write_bytes(&output_buffer)?;
+
+            if is_replace {
+                output.write_bytes(&new_buffer)?;
+            } else {
+                let mut output_buffer = Vec::new();
+                bidiff::simple_diff_with_params(
+                    &old_buffer,
+                    &new_buffer,
+                    &mut output_buffer,
+                    &bidiff::DiffParams::new(4, Some(20971520)).unwrap(),
+                )?;
+                output.write_bytes(&output_buffer)?;
+            }
         }
 
         Ok(())
@@ -364,6 +375,35 @@ impl PatchApplier {
                     io::copy(&mut patch.take(len), &mut hash_writer)?;
 
                     if hasher.finish() != hash {
+                        return Err(ApplyError::ChecksumMismatch);
+                    }
+
+                    println!("Write {:?}", hasher.finish());
+                }
+                InstrType::Replace => {
+                    let path = patch.read_path()?;
+                    let from_hash = patch.read_u64::<LittleEndian>()?;
+                    let to_hash = patch.read_u64::<LittleEndian>()?;
+                    println!("Replace {:?} {:?} {:?}", path, from_hash, to_hash);
+
+                    let len: u64 = patch.read_varint()?;
+
+                    let mut full_path = self.base.clone();
+                    full_path.push(path);
+
+                    let mut file_reader = File::open(&full_path)?;
+
+                    let org_hash = calc_hash_from_reader(&mut file_reader)?;
+                    if org_hash != from_hash {
+                        return Err(ApplyError::ChecksumMismatch);
+                    }
+
+                    let mut file_writer = File::create(full_path)?;
+                    let mut hasher = seahash::SeaHasher::default();
+                    let mut hash_writer = HasherPassthruWriter::new(&mut hasher, &mut file_writer);
+                    io::copy(&mut patch.take(len), &mut hash_writer)?;
+
+                    if hasher.finish() != to_hash {
                         return Err(ApplyError::ChecksumMismatch);
                     }
 
