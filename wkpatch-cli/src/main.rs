@@ -44,6 +44,16 @@ fn main() {
                         .index(2),
                 ),
         )
+        .subcommand(
+            SubCommand::with_name("info")
+                .about("Info about a patch")
+                .arg(
+                    Arg::with_name("PATCH_PATH")
+                        .help("Sets the patch path")
+                        .required(true)
+                        .index(1),
+                ),
+        )
         .get_matches();
 
     match matches.subcommand() {
@@ -71,6 +81,13 @@ fn main() {
                 directory.display()
             );
             let res = wkpatch::apply_patch(patch_path, directory);
+            if let Err(err) = res {
+                println!("{:?}", err);
+            }
+        }
+        ("info", Some(sub_match)) => {
+            let patch_path = Path::new(sub_match.value_of("PATCH_PATH").unwrap());
+            let res = wkpatch::patch_info(patch_path);
             if let Err(err) = res {
                 println!("{:?}", err);
             }

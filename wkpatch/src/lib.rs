@@ -104,6 +104,35 @@ impl InputDir {
     }
 }
 
+#[derive(Debug)]
+enum PatchInstr {
+    Same {
+        path: PathBuf,
+        hash: u64,
+    },
+    Add {
+        path: PathBuf,
+        hash: u64,
+        len: u64,
+    },
+    Remove {
+        path: PathBuf,
+        hash: u64,
+    },
+    Replace {
+        path: PathBuf,
+        from_hash: u64,
+        to_hash: u64,
+        len: u64,
+    },
+    BinaryPatch {
+        path: PathBuf,
+        from_hash: u64,
+        to_hash: u64,
+        len: u64,
+    },
+}
+
 struct PatchReader<'a> {
     input: &'a mut dyn Read,
 }
@@ -113,7 +142,53 @@ impl<'a> PatchReader<'a> {
         Self { input }
     }
 
-    fn read_instr_type(&mut self) -> Result<InstrType, ApplyError> {
+    fn read_instr(&mut self) -> Result<PatchInstr, io::Error> {
+        let t = self.read_instr_type()?;
+        match t {
+            InstrType::Same => {
+                let path = self.read_path()?;
+                let hash = self.read_u64::<LittleEndian>()?;
+                Ok(PatchInstr::Same { path, hash })
+            }
+            InstrType::Add => {
+                let path = self.read_path()?;
+                let hash = self.read_u64::<LittleEndian>()?;
+                let len: u64 = self.read_varint()?;
+                Ok(PatchInstr::Add { path, hash, len })
+            }
+            InstrType::Remove => {
+                let path = self.read_path()?;
+                let hash = self.read_u64::<LittleEndian>()?;
+                Ok(PatchInstr::Remove { path, hash })
+            }
+            InstrType::Replace => {
+                let path = self.read_path()?;
+                let from_hash = self.read_u64::<LittleEndian>()?;
+                let to_hash = self.read_u64::<LittleEndian>()?;
+                let len: u64 = self.read_varint()?;
+                Ok(PatchInstr::Replace {
+                    path,
+                    from_hash,
+                    to_hash,
+                    len,
+                })
+            }
+            InstrType::BinaryPatch => {
+                let path = self.read_path()?;
+                let from_hash = self.read_u64::<LittleEndian>()?;
+                let to_hash = self.read_u64::<LittleEndian>()?;
+                let len: u64 = self.read_varint()?;
+                Ok(PatchInstr::BinaryPatch {
+                    path,
+                    from_hash,
+                    to_hash,
+                    len,
+                })
+            }
+        }
+    }
+
+    fn read_instr_type(&mut self) -> Result<InstrType, io::Error> {
         let t = self.read_varint::<u8>()?;
         Ok(InstrType::try_from(t).unwrap())
     }
@@ -185,9 +260,7 @@ impl<T: Hasher> io::Write for HasherWriter<T> {
 }
 
 fn calc_hash(buffer: &[u8]) -> u64 {
-    let hash = seahash::hash(&buffer);
-    println!("{:?}", hash);
-    hash
+    seahash::hash(&buffer)
 }
 
 fn calc_hash_from_reader(reader: &mut dyn Read) -> Result<u64, io::Error> {
@@ -213,29 +286,41 @@ impl PatchMaker {
     fn create(&mut self, output: &mut PatchWriter) -> Result<u32, CreateError> {
         let mut i = 0u32;
         println!("Start remove");
-        let mut removed_paths: Vec<_> = self.old_input.files.difference(&self.new_input.files).collect();
+        let mut removed_paths: Vec<_> = self
+            .old_input
+            .files
+            .difference(&self.new_input.files)
+            .collect();
         removed_paths.sort();
         for p in removed_paths {
             self.remove(output, p)?;
             i += 1;
-            println!("Remove {} {}", i, p.display());
+            // println!("Remove {} {}", i, p.display());
         }
         println!("Start add");
-        let mut added_paths: Vec<_> = self.new_input.files.difference(&self.old_input.files).collect();
+        let mut added_paths: Vec<_> = self
+            .new_input
+            .files
+            .difference(&self.old_input.files)
+            .collect();
         added_paths.sort();
         for p in added_paths {
             self.add(output, p)?;
             i += 1;
-            println!("Add {} {}", i, p.display());
+            // println!("Add {} {}", i, p.display());
         }
         println!("Start diff");
-        let mut diff_paths: Vec<_> = self.old_input.files.intersection(&self.new_input.files).collect();
+        let mut diff_paths: Vec<_> = self
+            .old_input
+            .files
+            .intersection(&self.new_input.files)
+            .collect();
         diff_paths.sort();
         for p in diff_paths {
-            println!("Diff Start {} {}", i, p.display());
+            // println!("Diff Start {} {}", i, p.display());
             self.diff(output, p)?;
             i += 1;
-            println!("Diff End {} {}", i, p.display());
+            // println!("Diff End {} {}", i, p.display());
         }
         Ok(i)
     }
@@ -297,6 +382,7 @@ impl PatchMaker {
                     &bidiff::DiffParams::new(4, Some(20971520)).unwrap(),
                 )?;
                 output.write_bytes(&output_buffer)?;
+                println!("{:?} {:?}", p.display(), output_buffer.len())
             }
         }
 
@@ -340,14 +426,10 @@ impl PatchApplier {
     fn apply(&self, instr_count: u32, patch: &mut PatchReader) -> Result<(), ApplyError> {
         let start = time::Instant::now();
         for _i in 0..instr_count {
-            let t = patch.read_instr_type()?;
-            println!("InstrType: {:?}", t);
-            match t {
-                InstrType::Same => {
-                    let path = patch.read_path()?;
-                    let hash = patch.read_u64::<LittleEndian>()?;
-                    println!("Same {:?} {:?}", path, hash);
-
+            let instr = patch.read_instr()?;
+            println!("Instr: {:?}", instr);
+            match instr {
+                PatchInstr::Same { path, hash } => {
                     let mut full_path = self.base.clone();
                     full_path.push(path);
 
@@ -358,13 +440,7 @@ impl PatchApplier {
                         return Err(ApplyError::ChecksumMismatch);
                     }
                 }
-                InstrType::Add => {
-                    let path = patch.read_path()?;
-                    let hash = patch.read_u64::<LittleEndian>()?;
-                    println!("Add {:?} {:?}", path, hash);
-
-                    let len: u64 = patch.read_varint()?;
-
+                PatchInstr::Add { path, hash, len } => {
                     let mut full_path = self.base.clone();
                     full_path.push(path);
 
@@ -383,17 +459,13 @@ impl PatchApplier {
                     if hasher.finish() != hash {
                         return Err(ApplyError::ChecksumMismatch);
                     }
-
-                    println!("Write {:?}", hasher.finish());
                 }
-                InstrType::Replace => {
-                    let path = patch.read_path()?;
-                    let from_hash = patch.read_u64::<LittleEndian>()?;
-                    let to_hash = patch.read_u64::<LittleEndian>()?;
-                    println!("Replace {:?} {:?} {:?}", path, from_hash, to_hash);
-
-                    let len: u64 = patch.read_varint()?;
-
+                PatchInstr::Replace {
+                    path,
+                    from_hash,
+                    to_hash,
+                    len,
+                } => {
                     let mut full_path = self.base.clone();
                     full_path.push(path);
 
@@ -412,17 +484,13 @@ impl PatchApplier {
                     if hasher.finish() != to_hash {
                         return Err(ApplyError::ChecksumMismatch);
                     }
-
-                    println!("Write {:?}", hasher.finish());
                 }
-                InstrType::BinaryPatch => {
-                    let path = patch.read_path()?;
-                    let from_hash = patch.read_u64::<LittleEndian>()?;
-                    let to_hash = patch.read_u64::<LittleEndian>()?;
-                    println!("Binary Patch {:?} {:?} {:?}", path, from_hash, to_hash);
-
-                    let len: u64 = patch.read_varint()?;
-
+                PatchInstr::BinaryPatch {
+                    path,
+                    from_hash,
+                    to_hash,
+                    len,
+                } => {
                     let mut full_path = self.base.clone();
                     full_path.push(path);
 
@@ -454,18 +522,8 @@ impl PatchApplier {
                     }
 
                     fs::rename(&temp_path, &full_path)?;
-                    println!(
-                        "Diff applied {:?} {:?} {:?} {:?}",
-                        temp_path.display(),
-                        full_path.display(),
-                        to_hash,
-                        hasher.finish()
-                    );
                 }
-                InstrType::Remove => {
-                    let path = patch.read_path()?;
-                    let hash = patch.read_u64::<LittleEndian>()?;
-                    println!("Remove {:?} {:?}", path, hash);
+                PatchInstr::Remove { path, hash } => {
                     let mut full_path = self.base.clone();
                     full_path.push(path);
 
@@ -489,6 +547,89 @@ impl PatchApplier {
     }
 }
 
+struct PatchInfo {}
+
+impl PatchInfo {
+    fn new() -> Self {
+        Self {}
+    }
+
+    fn info(&self, instr_count: u32, patch: &mut PatchReader) -> Result<(), io::Error> {
+        println!("  SIZE       COMP SIZE       HASH             NAME");
+        for _i in 0..instr_count {
+            let instr = patch.read_instr()?;
+            match instr {
+                PatchInstr::Same { path, hash } => {
+                    println!(
+                        "S                            {:016x} {}",
+                        hash,
+                        path.display()
+                    );
+                }
+                PatchInstr::Add { path, hash, len } => {
+                    let s = self.compresses_size(&mut patch.take(len))?;
+                    println!(
+                        "A {:>10} {:>10} {:>3}% {:016x} {}",
+                        len,
+                        s,
+                        s * 100 / len,
+                        hash,
+                        path.display()
+                    );
+                }
+                PatchInstr::Replace {
+                    path,
+                    from_hash: _,
+                    to_hash,
+                    len,
+                } => {
+                    let s = self.compresses_size(&mut patch.take(len))?;
+                    println!(
+                        "R {:>10} {:>10} {:>3}% {:016x} {}",
+                        len,
+                        s,
+                        s * 100 / len,
+                        to_hash,
+                        path.display()
+                    );
+                }
+                PatchInstr::BinaryPatch {
+                    path,
+                    from_hash: _,
+                    to_hash,
+                    len,
+                } => {
+                    let s = self.compresses_size(&mut patch.take(len))?;
+                    println!(
+                        "P {:>10} {:>10} {:>3}% {:016x} {}",
+                        len,
+                        s,
+                        s * 100 / len,
+                        to_hash,
+                        path.display()
+                    );
+                }
+                PatchInstr::Remove { path, hash } => {
+                    println!(
+                        "M                            {:016x} {}",
+                        hash,
+                        path.display()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn compresses_size(&self, reader: &mut dyn Read) -> Result<u64, io::Error> {
+        let mut buf = Vec::new();
+        let mut zstd_writer = zstd::stream::Encoder::new(&mut buf, 21)?;
+        io::copy(reader, &mut zstd_writer)?;
+        zstd_writer.finish()?;
+        Ok(buf.len() as u64)
+    }
+}
+
 pub fn create_patch(
     from_directory: &Path,
     to_directory: &Path,
@@ -498,7 +639,7 @@ pub fn create_patch(
     let new_input = InputDir::new(to_directory);
     let mut file_writer = File::create(patch_path)?;
     file_writer.write_all(b"PTCH\0\0\0\0")?;
-    let mut zstd_writer = zstd::stream::Encoder::new(&mut file_writer, 10)?;
+    let mut zstd_writer = zstd::stream::Encoder::new(&mut file_writer, 21)?;
     let mut patch_writer = PatchWriter::new(&mut zstd_writer);
     let mut patch_maker = PatchMaker::new(old_input, new_input);
     let instr_count = patch_maker.create(&mut patch_writer)?;
@@ -525,6 +666,24 @@ pub fn apply_patch(patch_path: &Path, directory: &Path) -> Result<(), ApplyError
 
     let a = PatchApplier::new(directory);
     a.apply(instr_count, &mut patch_reader)?;
+    Ok(())
+}
+
+pub fn patch_info(patch_path: &Path) -> Result<(), io::Error> {
+    let mut file_reader = File::open(patch_path)?;
+
+    let mut buf = [0; 4];
+    file_reader.read_exact(&mut buf)?;
+
+    file_reader.read_exact(&mut buf)?;
+    let instr_count = u32::from_be_bytes(buf);
+
+    let mut zstd_reader = zstd::stream::Decoder::new(&mut file_reader)?;
+    let mut patch_reader = PatchReader::new(&mut zstd_reader);
+
+    let i = PatchInfo::new();
+    i.info(instr_count, &mut patch_reader)?;
+
     Ok(())
 }
 
